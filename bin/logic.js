@@ -6,14 +6,15 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 puppeteer.use(StealthPlugin());
 const hubSpot = require("../components/hubspot");
 const response = require("../network/response");
-const { writeLog } = require("../components/logger/mongoLogger");
-const { log } = require("winston");
+const { createContextLogger } = require("../components/logger/appLogger");
+
+const logger = createContextLogger("integration");
 // const chromium = require('chromium');
 
 const parseListingsFromData = (data, sourceName = "Unknown") => {
   if (!data) return [];
 
-  console.log(`[DEBUG] Attempting to parse listings from ${sourceName} (Length: ${data.length})...`);
+  logger.info(`[DEBUG] Attempting to parse listings from ${sourceName} (Length: ${data.length})...`);
 
   let listingsArray = [];
   try {
@@ -21,7 +22,7 @@ const parseListingsFromData = (data, sourceName = "Unknown") => {
     const parsed = typeof data === 'string' ? JSON.parse(data) : data;
     listingsArray = Array.isArray(parsed) ? parsed : (parsed.listings || []);
   } catch (err) {
-    console.warn(`[WARN] Failed to parse JSON data from ${sourceName}. falling back to regex extraction.`);
+    logger.warn(`[WARN] Failed to parse JSON data from ${sourceName}. falling back to regex extraction.`);
     // Fallback to regex if JSON parsing fails
     const regex = /detailsURL\s*:\s*["']([^"']+)["']/g;
     let match;
@@ -34,16 +35,16 @@ const parseListingsFromData = (data, sourceName = "Unknown") => {
     .map(item => item.detailsURL || item.url || item.listingURL)
     .filter(url => url && url.includes("/idx/details/listing"));
 
-  console.log(`[DEBUG] From ${sourceName}: Found ${urls.length} valid listing URLs.`);
+  logger.info(`[DEBUG] From ${sourceName}: Found ${urls.length} valid listing URLs.`);
 
   const uniqueLinks = [...new Set(urls)];
-  console.log(`[DEBUG] Unique links identified from ${sourceName}: ${uniqueLinks.length}`);
+  logger.info(`[DEBUG] Unique links identified from ${sourceName}: ${uniqueLinks.length}`);
 
   return uniqueLinks;
 };
 
 const pageDetails = async (browser, url) => {
-  console.log(`[DEBUG] Extracting details from: ${url}`);
+  logger.info(`[DEBUG] Extracting details from: ${url}`);
   let page;
   try {
     page = await browser.newPage();
@@ -76,12 +77,12 @@ const pageDetails = async (browser, url) => {
 
     // Diagnostic logging for LightSail
     if (response) {
-      console.log(`[DEBUG] HTTP Status: ${response.status()} for ${url}`);
+      logger.info(`[DEBUG] HTTP Status: ${response.status()} for ${url}`);
     }
 
     const pageTitle = await page.title();
     if (pageTitle.toLowerCase().includes("challenge") || pageTitle.toLowerCase().includes("robot")) {
-      console.warn(`[BOT-DETECTED] Page title suggests challenge: "${pageTitle}"`);
+      logger.warn(`[BOT-DETECTED] Page title suggests challenge: "${pageTitle}"`);
     }
 
     const data = await page.evaluate(() => {
@@ -244,13 +245,13 @@ const pageDetails = async (browser, url) => {
 
     if (data.error || !data.path) {
       const htmlSnippet = await page.evaluate(() => document.body.innerText.substring(0, 300));
-      console.log(`[DEBUG] Page Title: "${pageTitle}"`);
-      console.log(`[DEBUG] Content Snippet: "${htmlSnippet.replace(/\n/g, ' ')}"`);
+      logger.info(`[DEBUG] Page Title: "${pageTitle}"`);
+      logger.info(`[DEBUG] Content Snippet: "${htmlSnippet.replace(/\n/g, ' ')}"`);
     }
 
     return data;
   } catch (err) {
-    console.error(`[ERROR] in pageDetails for ${url}: `, err.message);
+    logger.error(`Error in pageDetails for ${url}`, { error: err.message, stack: err.stack });
     return { error: err.message };
   } finally {
     if (page) await page.close();
@@ -276,7 +277,7 @@ const getAllRows = async () => {
 
 const logic = async () => {
   const startTime = performance.now();
-  console.log("[START] Starting integration logic...");
+  logger.info("[START] Starting integration logic...");
 
   let browser;
   try {
@@ -288,7 +289,7 @@ const logic = async () => {
     ];
 
     const existingListings = await getAllRows();
-    console.log(`[HUBDB] Loaded ${existingListings.length} existing listings.`);
+    logger.info(`[HUBDB] Loaded ${existingListings.length} existing listings.`);
 
     browser = await puppeteer.launch({
       headless: "new", // Use the improved headless mode
@@ -307,14 +308,14 @@ const logic = async () => {
     });
 
     // WARM-UP Phase for LightSail initialization
-    console.log("[LOGIC] Warming up browser to prevent initial CPU bottlenecks...");
+    logger.info("[LOGIC] Warming up browser to prevent initial CPU bottlenecks...");
     const warmUpPage = await browser.newPage();
     try {
       await warmUpPage.goto("about:blank", { timeout: 30000 });
       await new Promise(r => setTimeout(r, 5000));
     } finally {
       await warmUpPage.close();
-      console.log("[LOGIC] Warm-up complete. Starting widget processing.");
+      logger.info("[LOGIC] Warm-up complete. Starting widget processing.");
     }
 
     const allFoundLinks = new Set();
@@ -330,7 +331,7 @@ const logic = async () => {
     };
 
     for (const url of widgetUrls) {
-      console.log(`[WIDGET] Processing URL: ${url}`);
+      logger.info(`[WIDGET] Processing URL: ${url}`);
       const page = await browser.newPage();
 
       try {
@@ -343,14 +344,14 @@ const logic = async () => {
 
         const content = await page.evaluate(() => document.body.innerText || document.body.textContent || document.documentElement.outerHTML);
 
-        console.log(`[WIDGET] Content captured. Length: ${content.length}. Snippet: ${content.substring(0, 500).replace(/\s+/g, ' ')}`);
+        logger.info(`[WIDGET] Content captured. Length: ${content.length}. Snippet: ${content.substring(0, 500).replace(/\s+/g, ' ')}`);
 
         // Target specifically the 'listings' key in the widgetAttributes variable
         // Looking for: [ 'listings', JSON.stringify([ ... ]) ]
         const listingsMatch = content.match(/\[\s*['"]listings['"]\s*,\s*JSON\.stringify\((.*?)\)\s*\]/is);
 
         if (listingsMatch && listingsMatch[1]) {
-          console.log(`[WIDGET] SUCCESS: Found listings data in widgetAttributes variable.`);
+          logger.info(`[WIDGET] SUCCESS: Found listings data in widgetAttributes variable.`);
           const links = parseListingsFromData(listingsMatch[1], "widgetAttributes");
           links.forEach(link => {
             // Ensure absolute URL
@@ -358,7 +359,7 @@ const logic = async () => {
             allFoundLinks.add(absoluteLink);
           });
         } else {
-          console.warn(`[WIDGET] JSON data not found in widgetAttributes for ${url}. Trying general fallback...`);
+          logger.warn(`[WIDGET] JSON data not found in widgetAttributes for ${url}. Trying general fallback...`);
 
           // General fallback (existing regex)
           const links = parseListingsFromData(content, "Full Content Fallback");
@@ -379,14 +380,14 @@ const logic = async () => {
               foundCount++;
             }
             if (foundCount > 0) {
-              console.log(`[WIDGET] SUCCESS: Found ${foundCount} listing URLs via raw regex fallback.`);
+              logger.info(`[WIDGET] SUCCESS: Found ${foundCount} listing URLs via raw regex fallback.`);
             } else {
-              console.error(`[WIDGET] FAILED to extract any listings from ${url}`);
+              logger.error(`[WIDGET] FAILED to extract any listings from ${url}`);
             }
           }
         }
       } catch (err) {
-        console.error(`[ERROR] Failed to process URL ${url}:`, err.message);
+        logger.error(`Failed to process URL ${url}`, { error: err.message, stack: err.stack });
       } finally {
         await page.close();
       }
@@ -394,7 +395,7 @@ const logic = async () => {
 
     const linksArray = Array.from(allFoundLinks);
     stats.total = linksArray.length;
-    console.log(`[SUMMARY] Total unique listings to process: ${stats.total}`);
+    logger.info(`[SUMMARY] Total unique listings to process: ${stats.total}`);
 
     const listingsToKeep = new Set();
     const retryQueue = [];
@@ -406,10 +407,10 @@ const logic = async () => {
 
         if (!currentPage || !currentPage.path || currentPage.error) {
           if (passName === "Main") {
-            console.warn(`[SKIP] Listing failed in ${passName} pass, adding to retry queue: ${listingUrl}`);
+            logger.warn(`[SKIP] Listing failed in ${passName} pass, adding to retry queue: ${listingUrl}`);
             retryQueue.push(listingUrl);
           } else {
-            console.error(`[FAIL] Listing failed again in ${passName} pass: ${listingUrl}`);
+            logger.error(`[FAIL] Listing failed again in ${passName} pass: ${listingUrl}`);
             stats.failed++;
           }
           return;
@@ -423,7 +424,7 @@ const logic = async () => {
         );
 
         if (currentListing) {
-          console.log(`[UPDATE] Updating ${path} (${passName} pass)`);
+          logger.info(`[UPDATE] Updating ${path} (${passName} pass)`);
           await hubSpot.hubDb.upsert(
             process.env.TABLE_ID,
             listingData,
@@ -433,7 +434,7 @@ const logic = async () => {
           );
           stats.updated++;
         } else {
-          console.log(`[CREATE] Creating ${path} (${passName} pass)`);
+          logger.info(`[CREATE] Creating ${path} (${passName} pass)`);
           await hubSpot.hubDb.upsert(
             process.env.TABLE_ID,
             listingData,
@@ -445,7 +446,7 @@ const logic = async () => {
         stats.success++;
         if (passName === "Retry") stats.retryPass++;
       } catch (err) {
-        console.error(`[ERROR] Exception processing listing ${listingUrl} (${passName} pass):`, err.message);
+        logger.error(`Exception processing listing ${listingUrl} (${passName} pass)`, { error: err.message, stack: err.stack });
         if (passName === "Main") retryQueue.push(listingUrl);
         else stats.failed++;
       }
@@ -453,17 +454,17 @@ const logic = async () => {
 
     // Parallel execution with low concurrency for memory safety
     const concurrency = 2;
-    console.log(`[LOGIC] Starting parallel processing with concurrency: ${concurrency}`);
+    logger.info(`[LOGIC] Starting parallel processing with concurrency: ${concurrency}`);
 
     for (let i = 0; i < linksArray.length; i += concurrency) {
       const chunk = linksArray.slice(i, i + concurrency);
-      console.log(`[PROGRESS] Processing batch ${Math.floor(i / concurrency) + 1}/${Math.ceil(linksArray.length / concurrency)}`);
+      logger.info(`[PROGRESS] Processing batch ${Math.floor(i / concurrency) + 1}/${Math.ceil(linksArray.length / concurrency)}`);
       await Promise.all(chunk.map(url => processListing(url, "Main")));
     }
 
     // Pass 2: Retry Queue
     if (retryQueue.length > 0) {
-      console.log(`\n[RETRY] Starting retry pass for ${retryQueue.length} listings...`);
+      logger.info(`\n[RETRY] Starting retry pass for ${retryQueue.length} listings...`);
       // Retrying sequentially to be extra memory-safe in this phase
       for (const url of retryQueue) {
         await processListing(url, "Retry");
@@ -476,17 +477,17 @@ const logic = async () => {
       .map(item => item.id);
 
     if (toRemove.length > 0) {
-      console.log(`[CLEANUP] Removing ${toRemove.length} stale listings.`);
+      logger.info(`[CLEANUP] Removing ${toRemove.length} stale listings.`);
       await hubSpot.hubDb.remove(process.env.TABLE_ID, toRemove);
     }
 
     // Final publishing
-    console.log("[HS] Publishing table changes...");
+    logger.info("[HS] Publishing table changes...");
     await hubSpot.hubDb.publish(process.env.TABLE_ID);
 
     // Final Stats
     const totalDuration = ((performance.now() - startTime) / 1000).toFixed(2);
-    console.log(`
+    logger.info(`
 =========================================
           EXECUTION SUMMARY
 =========================================
@@ -502,18 +503,25 @@ Total Duration:          ${totalDuration}s
 `);
 
   } catch (err) {
-    console.error("[CRITICAL] Error during logic execution:", err);
+    logger.error("Critical error during logic execution", { error: err.message, stack: err.stack });
   } finally {
     if (browser) await browser.close();
   }
 
   const duration = (performance.now() - startTime) / 1000;
-  console.log(`[END] Integration finished in ${duration.toFixed(2)}s`);
+  logger.info(`[END] Integration finished in ${duration.toFixed(2)}s`);
 };
 
 
-const main = async (req, res, next) => {
-  logic();
+const main = async (req, res) => {
+  logic().catch((err) => {
+    logger.error("Unhandled error executing integration", { error: err.message, stack: err.stack });
+  });
+
+  if (!req || !res) {
+    return;
+  }
+
   return response.success(req, res, "Integration in process...");
 };
 

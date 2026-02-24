@@ -1,5 +1,8 @@
 const express = require('express')
 const cors = require('cors');
+const { createContextLogger } = require('../components/logger/appLogger');
+
+const logger = createContextLogger('server');
 
 
 // const { dbConnection } = require('../DB/config');
@@ -31,8 +34,10 @@ class Server {
     listen() {
 
         this.app.listen(this.port, () => {
-
-            console.log('Servidor corriendo en el puerto', this.port, 'access here: http://localhost:8080');
+            logger.info('Servidor corriendo', {
+                port: this.port,
+                url: `http://localhost:${this.port}`,
+            });
         });
     }
 
