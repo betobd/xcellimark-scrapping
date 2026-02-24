@@ -275,6 +275,51 @@ const getAllRows = async () => {
   return existingListings;
 };
 
+const fetchWidgetContent = async (browser, url) => {
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const page = await browser.newPage();
+    try {
+      await page.setExtraHTTPHeaders({
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
+      });
+
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+      );
+
+      await page.goto(url, {
+        waitUntil: "networkidle2",
+        timeout: 90000,
+        referer: "https://bellacollina.idxbroker.com/"
+      });
+
+      await new Promise((r) => setTimeout(r, attempt === 1 ? 8000 : 12000));
+
+      const content = await page.evaluate(
+        () => document.body.innerText || document.body.textContent || document.documentElement.outerHTML
+      );
+
+      if (!content || content.length < 50) {
+        throw new Error("Empty or short widget payload");
+      }
+
+      return content;
+    } catch (err) {
+      logger.warn(`[WIDGET] Attempt ${attempt}/${maxAttempts} failed for ${url}: ${err.message}`);
+      if (attempt === maxAttempts) throw err;
+    } finally {
+      await page.close();
+    }
+  }
+
+  return "";
+};
+
 const logic = async () => {
   const startTime = performance.now();
   logger.info("[START] Starting integration logic...");
@@ -312,6 +357,10 @@ const logic = async () => {
     const warmUpPage = await browser.newPage();
     try {
       await warmUpPage.goto("about:blank", { timeout: 30000 });
+      await warmUpPage.goto("https://bellacollina.idxbroker.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 90000
+      });
       await new Promise(r => setTimeout(r, 5000));
     } finally {
       await warmUpPage.close();
@@ -332,17 +381,9 @@ const logic = async () => {
 
     for (const url of widgetUrls) {
       logger.info(`[WIDGET] Processing URL: ${url}`);
-      const page = await browser.newPage();
 
       try {
-        // Use networkidle2 for widgets to ensure Cloudflare challenge completes if it appears
-        // and increase timeout for slow server responses on Lightsail
-        await page.goto(url, { waitUntil: "networkidle2", timeout: 90000 });
-
-        // Extra wait for any async hydration
-        await new Promise(r => setTimeout(r, 8000));
-
-        const content = await page.evaluate(() => document.body.innerText || document.body.textContent || document.documentElement.outerHTML);
+        const content = await fetchWidgetContent(browser, url);
 
         logger.info(`[WIDGET] Content captured. Length: ${content.length}. Snippet: ${content.substring(0, 500).replace(/\s+/g, ' ')}`);
 
@@ -388,8 +429,6 @@ const logic = async () => {
         }
       } catch (err) {
         logger.error(`Failed to process URL ${url}`, { error: err.message, stack: err.stack });
-      } finally {
-        await page.close();
       }
     }
 
