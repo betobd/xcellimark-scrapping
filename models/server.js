@@ -8,7 +8,7 @@ class Server {
 
     constructor() {
         this.app = express();
-        this.port = process.env.PORT;
+        this.port = process.env.PORT || 8080;
         this.paths = {
             webScraping: '/api/webScarping'
         }
@@ -20,6 +20,8 @@ class Server {
 
         this.app.use(cors());
         this.app.use(express.json());
+
+        this.app.get('/health', (_req, res) => res.status(200).json({ status: 'ok' }));
     }
 
     routes() {
